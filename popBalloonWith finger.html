@@ -1,0 +1,352 @@
+import json
+
+from google.colab import output
+
+from IPython.display import display, HTML
+
+ 
+
+# ---------------- Python leaderboard ----------------
+
+if 'leaderboard' not in globals():
+
+    leaderboard = []
+
+ 
+
+def save_score(name, score):
+
+    global leaderboard
+
+    leaderboard.append({'name': name, 'score': int(score)})
+
+    leaderboard = sorted(leaderboard, key=lambda x: x['score'], reverse=True)
+
+    return leaderboard
+
+ 
+
+output.register_callback('notebook.save_score', save_score)
+
+ 
+
+def get_high_score():
+
+    return max((e['score'] for e in leaderboard), default=0)
+
+ 
+
+output.register_callback('notebook.get_high_score', get_high_score)
+
+ 
+
+# ---------------- HTML + JS ----------------
+
+html_code = """
+
+<!DOCTYPE html>
+
+<html>
+
+<head>
+
+<meta charset="utf-8">
+
+<style>
+
+body { font-family: 'Segoe UI', sans-serif; text-align: center; background: #222; margin:0; padding:20px; color:white; }
+
+#game-container { position:relative; width:640px; height:480px; margin:0 auto; border:2px solid #555; overflow:hidden; border-radius:8px; }
+
+canvas { display:block; width:100%; height:100%; object-fit:cover; }
+
+.hud-bar { padding:10px 20px; display:flex; justify-content:space-between; font-size:18px; font-weight:bold; text-shadow:2px 2px 0 #000; }
+
+#ui-layer { position:absolute; top:0; left:0; width:100%; height:100%; pointer-events:none; display:flex; flex-direction:column; justify-content:space-between; }
+
+#loading-screen, #start-screen, #lb-screen { position:absolute; top:0; left:0; width:100%; height:100%; display:flex; flex-direction:column; align-items:center; justify-content:center; z-index:100; border-radius:8px;}
+
+#loading-screen { background:rgba(1,5,0,0.9); color:Green; }
+
+#start-screen, #lb-screen { background:rgba(255,255,255,0.95); color:#333; display:none; }
+
+input, button { padding:10px; font-size:16px; margin:5px; border-radius:4px; }
+
+button { background:#ff4757;color:blue;border:none;cursor:pointer; }
+
+#debug-log { margin-top:10px; font-family:monospace; font-size:12px; color:#aaa; }
+
+</style>
+
+</head>
+
+<body>
+
+ 
+
+<div id="game-container">
+
+<canvas id="game-canvas" width="640" height="480"></canvas>
+
+ 
+
+<div id="loading-screen"><h2>🎈 Hand Popper AI 🎈</h2><p id="status-text">Initializing...</p><div id="debug-log"></div></div>
+
+ 
+
+<div id="ui-layer">
+
+<div class="hud-bar"><span id="player-disp">Player: ???</span><span id="score-disp">Score: 0</span><span id="highscore-disp">High Score: 0</span></div>
+
+<div class="hud-bar"><span id="time-disp" style="color:#ff6b81;">Time:30</span><span style="color:#7bed9f;">👉 Point to Pop!</span></div>
+
+</div>
+
+ 
+
+<div id="start-screen">
+
+<h1>Ready to Play?</h1>
+
+<p><b>LET's Play</b> ->pop balloons.</p>
+
+<input type="text" id="pname" placeholder="Enter Name"><br>
+
+Background Image: <input type="file" id="bgImageUpload" accept="image/*"><br>
+
+Background Music: <input type="file" id="bgmUpload" accept="audio/*"><br>
+
+Pop Sound: <input type="file" id="popSoundUpload" accept="audio/*"><span id="popSoundStatus">No pop sound loaded</span><br><br>
+
+<button id="btn-start">START</button>
+
+<button id="btn-pause">PAUSE</button>
+
+<button id="btn-stop">STOP</button>
+
+</div>
+
+ 
+
+<div id="lb-screen">
+
+<h2>END</h2>
+
+<h3 id="final-score" style="color:#ff4757;"></h3>
+
+<div id="lb-body" style="width:80%;text-align:left;background:#eee;padding:10px;max-height:200px;overflow-y:auto;"></div>
+
+<br>
+
+<button id="btn-reset">PLAY AGAIN</button>
+
+</div>
+
+</div>
+
+ 
+
+<script type="module">
+
+import { GestureRecognizer, FilesetResolver } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3/+esm";
+
+ 
+
+const canvas=document.getElementById('game-canvas'), ctx=canvas.getContext('2d');
+
+let gestureRecognizer, lastVideoTime=-1;
+
+let balloons=[], score=0, timeLeft=30, timerInterval, isPlaying=false, isPaused=false;
+
+let playerName="Anon", cursor={x:320,y:240,active:false};
+
+let popAudio=null, bgmAudio=null;
+
+let backgroundImg=new Image();
+
+let highScore=0;
+
+ 
+
+// ---------------- File Uploads ----------------
+
+document.getElementById('popSoundUpload').addEventListener('change',e=>{const f=e.target.files[0]; if(f){popAudio=new Audio(URL.createObjectURL(f)); document.getElementById('popSoundStatus').innerText="Pop sound loaded ✔";}});
+
+document.getElementById('bgmUpload').addEventListener('change',e=>{const f=e.target.files[0]; if(f){bgmAudio=new Audio(URL.createObjectURL(f)); bgmAudio.loop=true; bgmAudio.volume=0.2;}});
+
+document.getElementById('bgImageUpload').addEventListener('change',e=>{const f=e.target.files[0]; if(f){backgroundImg.src=URL.createObjectURL(f);}});
+
+ 
+
+// ---------------- Hand Tracking ----------------
+
+const video=document.createElement('video'); video.autoplay=true; video.playsInline=true;
+
+navigator.mediaDevices.getUserMedia({video:true}).then(s=>video.srcObject=s);
+
+async function initHandTracking(){
+
+    document.getElementById('debug-log').innerText="Loading hand tracking model...";
+
+    const vision=await FilesetResolver.forVisionTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3/wasm");
+
+    gestureRecognizer=await GestureRecognizer.createFromOptions(vision,{
+
+        baseOptions:{modelAssetPath:"https://storage.googleapis.com/mediapipe-models/gesture_recognizer/gesture_recognizer/float16/1/gesture_recognizer.task",delegate:"GPU"},
+
+        runningMode:"VIDEO", numHands:2
+
+    });
+
+    document.getElementById('loading-screen').style.display='none';
+
+    document.getElementById('start-screen').style.display='flex';
+
+    document.getElementById('debug-log').innerText="Hand tracking ready!";
+
+}
+
+initHandTracking();
+
+ 
+
+// ---------------- Game Functions ----------------
+
+function spawnBalloon(){let c=[{h:0,s:'100%',l:'60%'},{h:120,s:'100%',l:'40%'},{h:210,s:'100%',l:'60%'},{h:280,s:'100%',l:'60%'},{h:40,s:'100%',l:'50%'}]; let col=c[Math.floor(Math.random()*c.length)]; let r=Math.random()*20+25; balloons.push({x:Math.random()*(canvas.width-60)+30,y:canvas.height+50,r:r,speed:Math.random()*2+1.5,color:col,points:(r<32)?5:1});}
+
+ 
+
+async function renderLoop(){
+
+    ctx.clearRect(0,0,canvas.width,canvas.height);
+
+    ctx.drawImage(backgroundImg,0,0,canvas.width,canvas.height);
+
+ 
+
+    if(gestureRecognizer && video.readyState===4 && video.currentTime!==lastVideoTime){
+
+        lastVideoTime=video.currentTime;
+
+        const results=gestureRecognizer.recognizeForVideo(video,Date.now());
+
+        cursor.active=false;
+
+        if(results.landmarks){
+
+            for(const lm of results.landmarks){
+
+                const tip=lm[8]; cursor.x=(1-tip.x)*canvas.width; cursor.y=tip.y*canvas.height; cursor.active=true;
+
+                ctx.beginPath(); ctx.arc(cursor.x,cursor.y,15,0,2*Math.PI); ctx.strokeStyle="#ff0"; ctx.lineWidth=3; ctx.stroke();
+
+            }
+
+        }
+
+    }
+
+ 
+
+    if(isPlaying && !isPaused){
+
+        if(Math.random()<0.04) spawnBalloon();
+
+        for(let i=balloons.length-1;i>=0;i--){
+
+            let b=balloons[i]; b.y-=b.speed;
+
+            if(cursor.active && Math.hypot(cursor.x-b.x,cursor.y-b.y)<b.r+15){score+=b.points; if(popAudio){popAudio.cloneNode().play();} balloons.splice(i,1); continue;}
+
+            if(b.y<-50) balloons.splice(i,1); else{
+
+                let grad=ctx.createRadialGradient(b.x-b.r/3,b.y-b.r/3,b.r/5,b.x,b.y,b.r);
+
+                grad.addColorStop(0,"white"); grad.addColorStop(0.3,`hsl(${b.color.h},${b.color.s},${b.color.l})`); grad.addColorStop(1,`hsl(${b.color.h},${b.color.s},30%)`);
+
+                ctx.beginPath(); ctx.arc(b.x,b.y,b.r,0,2*Math.PI); ctx.fillStyle=grad; ctx.fill();
+
+            }
+
+        }
+
+    }
+
+ 
+
+    document.getElementById('score-disp').innerText="Score:"+score;
+
+    google.colab.kernel.invokeFunction('notebook.get_high_score',[],{}).then(hs=>{highScore=Math.max(hs,score); document.getElementById('highscore-disp').innerText="High Score:"+highScore;});
+
+ 
+
+    requestAnimationFrame(renderLoop);
+
+}
+
+renderLoop();
+
+ 
+
+// ---------------- UI Functions ----------------
+
+function startGame(){playerName=document.getElementById('pname').value.trim()||"Anon";
+
+document.getElementById('player-disp').innerText="Player: "+playerName;
+
+document.getElementById('start-screen').style.display='none'; document.getElementById('lb-screen').style.display='none';
+
+score=0; timeLeft=30; balloons=[]; isPlaying=true; isPaused=false;
+
+if(bgmAudio){bgmAudio.currentTime=0; bgmAudio.play().catch(()=>{});}
+
+timerInterval=setInterval(()=>{if(!isPaused){timeLeft--; document.getElementById('time-disp').innerText="Time:"+timeLeft; if(timeLeft<=0) endGame();}},1000);
+
+}
+
+function pauseGame(){isPaused=!isPaused; if(bgmAudio) isPaused?bgmAudio.pause():bgmAudio.play();}
+
+function stopGame(){isPlaying=false; clearInterval(timerInterval); if(bgmAudio){bgmAudio.pause(); bgmAudio.currentTime=0;} endGame();}
+
+function endGame(){isPlaying=false; clearInterval(timerInterval); if(bgmAudio){bgmAudio.pause(); bgmAudio.currentTime=0;}
+
+document.getElementById('final-score').innerText="Final Score: "+score; document.getElementById('lb-screen').style.display='flex';
+
+document.getElementById('lb-body').innerHTML="Saving score...";
+
+google.colab.kernel.invokeFunction('notebook.save_score',[playerName,score],{}).then(r=>{
+
+    const data=r.data['application/json'];
+
+    let html="<table style='width:100%'><tr><th>#</th><th>Name</th><th>Score</th></tr>";
+
+    data.forEach((e,i)=>{html+=`<tr><td>#${i+1}</td><td>${e.name}</td><td>${e.score}</td></tr>`;});
+
+    html+="</table>"; document.getElementById('lb-body').innerHTML=html;
+
+});}
+
+function resetGame(){document.getElementById('lb-screen').style.display='none'; document.getElementById('start-screen').style.display='flex';}
+
+ 
+
+document.getElementById('btn-start').onclick=startGame;
+
+document.getElementById('btn-pause').onclick=pauseGame;
+
+document.getElementById('btn-stop').onclick=stopGame;
+
+document.getElementById('btn-reset').onclick=resetGame;
+
+</script>
+
+</body>
+
+</html>
+
+"""
+
+ 
+
+display(HTML(html_code))
+
