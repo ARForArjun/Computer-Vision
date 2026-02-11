@@ -1,0 +1,253 @@
+from IPython.display import display, HTML
+
+display(HTML("""
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+body {
+  background: black;
+  color: white;
+  text-align: center;
+  font-family: Arial;
+}
+#game {
+  width: 800px;
+  height: 600px;
+  margin: auto;
+  position: relative;
+  border: 3px solid #00e5ff;
+}
+canvas {
+  background: url('https://images.unsplash.com/photo-1506318137071-a8e063b4b4bf?q=80&w=800&auto=format&fit=crop');
+}
+#ui {
+  position: absolute;
+  top: 10px;
+  left: 10px;
+  color: #00e5ff;
+  font-size: 18px;
+}
+#buttons {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+}
+button {
+  padding: 6px 12px;
+  margin-left: 5px;
+  background: #00e5ff;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+}
+#overlay {
+  position: absolute;
+  inset: 0;
+  background: rgba(0,0,0,0.85);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  font-size: 28px;
+}
+</style>
+</head>
+
+<body>
+
+<h2>🖐 Hand Gesture Space Game (Colab)</h2>
+
+<div id="game">
+  <div id="ui">SCORE: <span id="score">0</span></div>
+
+  <div id="buttons">
+    <button id="pauseBtn">PAUSE</button>
+    <button id="quitBtn">QUIT</button>
+  </div>
+
+  <div id="overlay">
+    <button id="startBtn">START GAME</button>
+  </div>
+
+  <canvas id="canvas" width="800" height="600"></canvas>
+</div>
+
+<video id="video" autoplay playsinline style="display:none"></video>
+
+<script type="module">
+import { HandLandmarker, FilesetResolver }
+from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3/+esm";
+
+const canvas = document.getElementById("canvas");
+const ctx = canvas.getContext("2d");
+const video = document.getElementById("video");
+const overlay = document.getElementById("overlay");
+const scoreEl = document.getElementById("score");
+
+const startBtn = document.getElementById("startBtn");
+const pauseBtn = document.getElementById("pauseBtn");
+const quitBtn = document.getElementById("quitBtn");
+
+let landmarker, stream;
+let gameState = "STOPPED"; // RUNNING, PAUSED, GAMEOVER, QUIT
+let score = 0;
+
+const ship = { x: 400, y: 500, r: 18 };
+const bullets = [];
+const enemies = [];
+
+let lastShot = 0;
+let lastHandFrame = 0;
+
+/* ---------- BUTTON EVENTS (FIX) ---------- */
+startBtn.addEventListener("click", startGame);
+pauseBtn.addEventListener("click", pauseGame);
+quitBtn.addEventListener("click", quitGame);
+
+/* ---------- GAME FUNCTIONS ---------- */
+async function startGame() {
+  overlay.style.display = "none";
+  gameState = "RUNNING";
+  score = 0;
+  bullets.length = 0;
+  enemies.length = 0;
+  scoreEl.innerText = score;
+
+  if (!landmarker) {
+    const vision = await FilesetResolver.forVisionTasks(
+      "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3/wasm"
+    );
+
+    landmarker = await HandLandmarker.createFromOptions(vision, {
+      baseOptions: {
+        modelAssetPath:
+          "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task"
+      },
+      runningMode: "VIDEO",
+      numHands: 1
+    });
+
+    stream = await navigator.mediaDevices.getUserMedia({ video: true });
+    video.srcObject = stream;
+    video.play();
+  }
+
+  requestAnimationFrame(loop);
+}
+
+function pauseGame() {
+  gameState = gameState === "RUNNING" ? "PAUSED" : "RUNNING";
+}
+
+function quitGame() {
+  gameState = "QUIT";
+  overlay.style.display = "flex";
+  overlay.innerHTML = "<h1>GAME QUIT</h1>";
+  stream?.getTracks().forEach(t => t.stop());
+}
+
+function gameOver() {
+  gameState = "GAMEOVER";
+  overlay.style.display = "flex";
+  overlay.innerHTML =
+    "<h1>GAME OVER</h1><button id='restartBtn'>RESTART</button>";
+
+  document.getElementById("restartBtn")
+    .addEventListener("click", startGame);
+}
+
+function spawnEnemy() {
+  if (Math.random() < 0.025 && enemies.length < 10) {
+    enemies.push({
+      x: Math.random() * 760,
+      y: -40,
+      w: 40,
+      h: 40,
+      speed: 2 + Math.random() * 2
+    });
+  }
+}
+
+function handleHand(now) {
+  if (now - lastHandFrame < 70) return;
+  lastHandFrame = now;
+
+  const res = landmarker.detectForVideo(video, now);
+  if (!res.landmarks.length) return;
+
+  const hand = res.landmarks[0];
+  const index = hand[8];
+  const thumb = hand[4];
+
+  ship.x = (1 - index.x) * 800;
+  ship.y = index.y * 600;
+
+  const d = Math.hypot(index.x - thumb.x, index.y - thumb.y);
+  if (d < 0.05 && now - lastShot > 250) {
+    bullets.push({ x: ship.x, y: ship.y });
+    lastShot = now;
+  }
+}
+
+function update() {
+  for (let i = bullets.length - 1; i >= 0; i--) {
+    bullets[i].y -= 10;
+    if (bullets[i].y < 0) bullets.splice(i, 1);
+  }
+
+  for (let i = enemies.length - 1; i >= 0; i--) {
+    const e = enemies[i];
+    e.y += e.speed;
+
+    const dx = ship.x - (e.x + 20);
+    const dy = ship.y - (e.y + 20);
+    if (Math.hypot(dx, dy) < ship.r + 18) {
+      gameOver();
+      return;
+    }
+
+    for (let j = bullets.length - 1; j >= 0; j--) {
+      const b = bullets[j];
+      if (b.x > e.x && b.x < e.x + e.w &&
+          b.y > e.y && b.y < e.y + e.h) {
+        bullets.splice(j, 1);
+        enemies.splice(i, 1);
+        score += 10;
+        scoreEl.innerText = score;
+        break;
+      }
+    }
+  }
+  spawnEnemy();
+}
+
+function draw() {
+  ctx.clearRect(0, 0, 800, 600);
+
+  ctx.fillStyle = "#00e5ff";
+  ctx.beginPath();
+  ctx.arc(ship.x, ship.y, ship.r, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.fillStyle = "yellow";
+  bullets.forEach(b => ctx.fillRect(b.x - 2, b.y, 4, 10));
+
+  ctx.fillStyle = "red";
+  enemies.forEach(e => ctx.fillRect(e.x, e.y, e.w, e.h));
+}
+
+function loop(time) {
+  if (gameState === "RUNNING" && video.readyState === 4) {
+    handleHand(time);
+    update();
+    draw();
+  }
+  requestAnimationFrame(loop);
+}
+</script>
+
+</body>
+</html>
+"""))
