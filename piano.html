@@ -1,0 +1,354 @@
+from IPython.display import HTML
+html_piano_code = """
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+
+<style>
+
+  body { font-family: 'Segoe UI', sans-serif; text-align: center; background: #1a1a1a; margin: 0; padding: 20px; color: white; }
+
+  #game-container { position: relative; width: 640px; height: 480px; margin: 0 auto; background: #000; border: 4px solid #333; border-radius: 8px; overflow: hidden; }
+
+  canvas { display: block; width: 100%; height: 100%; z-index: 1; position: relative; }
+
+  #video-input { display: none; }
+
+  #ui-layer { position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; z-index: 2; }
+
+  .hud { padding: 15px; display: flex; justify-content: center; font-size: 22px; font-weight: bold; text-shadow: 2px 2px 4px #000; }
+
+  #control-buttons { position: absolute; bottom: 10px; left: 50%; transform: translateX(-50%); z-index: 3; }
+
+  #control-buttons button { padding: 10px 25px; margin: 5px; background: #00e5ff; border: none; cursor: pointer; font-weight: bold; border-radius: 4px; }
+
+  #start-screen {
+
+      position: absolute; top:0; left:0; width:100%; height:100%;
+
+      background: rgba(0,0,0,0.8); z-index: 100; display: flex; flex-direction: column; align-items: center; justify-content: center;
+
+  }
+
+  input { padding: 10px; border-radius: 4px; border: none; margin-bottom: 10px; }
+
+</style>
+
+</head>
+
+<body>
+
+ 
+
+<div id="game-container">
+
+  <video id="video-input" autoplay playsinline></video>
+
+  <canvas id="game-canvas" width="640" height="480"></canvas>
+
+ 
+
+  <div id="ui-layer">
+
+    <div class="hud">
+
+      <span id="note-disp" style="color: #00e5ff;">Play a Note!</span>
+
+    </div>
+
+  </div>
+
+ 
+
+  <!-- START/STOP buttons visible above canvas -->
+
+  <div id="control-buttons">
+
+    <button onclick="startGame()">START</button>
+
+    <button onclick="stopGame()">STOP</button>
+
+  </div>
+
+ 
+
+  <div id="start-screen">
+
+    <h2>🎹 AI Hand Piano</h2>
+
+    <p>Use your <b>Index Finger</b> to press the piano keys.</p>
+
+    <input type="text" id="pname" placeholder="Your Name">
+
+    <button onclick="startGame()">START CONCERT</button>
+
+  </div>
+
+</div>
+
+ 
+
+<script type="module">
+
+import { GestureRecognizer, FilesetResolver } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3/+esm";
+
+ 
+
+const video = document.getElementById('video-input');
+
+const canvas = document.getElementById('game-canvas');
+
+const ctx = canvas.getContext('2d');
+
+ 
+
+let gestureRecognizer;
+
+let audioCtx;
+
+let isPlaying = false;
+
+let lastKey = -1;
+
+ 
+
+// Piano keys
+
+const keys = [
+
+  { name: 'C', freq: 261.63, color: 'white' },
+
+  { name: 'C#', freq: 277.18, color: 'black' },
+
+  { name: 'D', freq: 293.66, color: 'white' },
+
+  { name: 'D#', freq: 311.13, color: 'black' },
+
+  { name: 'E', freq: 329.63, color: 'white' },
+
+  { name: 'F', freq: 349.23, color: 'white' },
+
+  { name: 'F#', freq: 369.99, color: 'black' },
+
+  { name: 'G', freq: 392.00, color: 'white' },
+
+  { name: 'G#', freq: 415.30, color: 'black' },
+
+  { name: 'A', freq: 440.00, color: 'white' },
+
+  { name: 'A#', freq: 466.16, color: 'black' },
+
+  { name: 'B', freq: 493.88, color: 'white' },
+
+  { name: 'C2', freq: 523.25, color: 'white' }
+
+];
+
+const keyWidth = 640 / keys.length;
+
+ 
+
+let latestLandmarks = null;
+
+ 
+
+async function initVision() {
+
+  const vision = await FilesetResolver.forVisionTasks(
+
+    "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3/wasm"
+
+  );
+
+  gestureRecognizer = await GestureRecognizer.createFromOptions(vision, {
+
+    baseOptions: {
+
+      modelAssetPath: "https://storage.googleapis.com/mediapipe-models/gesture_recognizer/gesture_recognizer/float16/1/gesture_recognizer.task",
+
+      delegate: "GPU"
+
+    },
+
+    runningMode: "VIDEO"
+
+  });
+
+ 
+
+  const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+
+  video.srcObject = stream;
+
+  video.play();
+
+ 
+
+  detectHand();
+
+  render();
+
+}
+
+ 
+
+function playNote(freq) {
+
+  if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+
+  const osc = audioCtx.createOscillator();
+
+  const gain = audioCtx.createGain();
+
+  osc.type = 'triangle';
+
+  osc.frequency.setValueAtTime(freq, audioCtx.currentTime);
+
+  gain.gain.setValueAtTime(0.2, audioCtx.currentTime);
+
+  gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.5);
+
+  osc.connect(gain);
+
+  gain.connect(audioCtx.destination);
+
+  osc.start();
+
+  osc.stop(audioCtx.currentTime + 0.5);
+
+}
+
+ 
+
+// Start/Stop functions
+
+window.startGame = () => { isPlaying = true; document.getElementById('start-screen').style.display = 'none'; }
+
+window.stopGame = () => { isPlaying = false; document.getElementById('note-disp').innerText = "Paused"; lastKey = -1; }
+
+ 
+
+// Async hand detection
+
+async function detectHand() {
+
+  if (gestureRecognizer && video.readyState >= 2 && isPlaying) {
+
+    const results = await gestureRecognizer.recognizeForVideo(video, Date.now());
+
+    latestLandmarks = (results.landmarks && results.landmarks.length > 0) ? results.landmarks[0] : null;
+
+  } else {
+
+    latestLandmarks = null;
+
+  }
+
+  requestAnimationFrame(detectHand);
+
+}
+
+ 
+
+// Render loop
+
+function render() {
+
+  ctx.save();
+
+  ctx.translate(640, 0);
+
+  ctx.scale(-1, 1);
+
+  ctx.drawImage(video, 0, 0, 640, 480);
+
+  ctx.restore();
+
+ 
+
+  keys.forEach((key, i) => {
+
+    const x = i * keyWidth;
+
+    const height = key.color === 'white' ? 140 : 90;
+
+    ctx.fillStyle = (lastKey === i) ? '#00e5ff' : (key.color === 'white' ? '#fff' : '#000');
+
+    ctx.fillRect(x, 330, keyWidth, height);
+
+    ctx.strokeStyle = '#000';
+
+    ctx.strokeRect(x, 330, keyWidth, height);
+
+    ctx.fillStyle = key.color === 'white' ? '#000' : '#fff';
+
+    ctx.fillText(key.name, x + keyWidth/4, 455);
+
+  });
+
+ 
+
+  if (latestLandmarks && isPlaying) {
+
+    const tip = latestLandmarks[8];
+
+    const x = (1 - tip.x) * 640;
+
+    const y = tip.y * 480;
+
+ 
+
+    ctx.beginPath();
+
+    ctx.arc(x, y, 10, 0, Math.PI*2);
+
+    ctx.fillStyle = "#ff4757";
+
+    ctx.fill();
+
+ 
+
+    if (y > 330) {
+
+      const keyIndex = Math.floor(x / keyWidth);
+
+      if (keyIndex >= 0 && keyIndex < keys.length && keyIndex !== lastKey) {
+
+        playNote(keys[keyIndex].freq);
+
+        document.getElementById('note-disp').innerText = "Playing: " + keys[keyIndex].name;
+
+        lastKey = keyIndex;
+
+      }
+
+    } else {
+
+      lastKey = -1;
+
+    }
+
+  }
+
+ 
+
+  requestAnimationFrame(render);
+
+}
+
+ 
+
+initVision();
+
+</script>
+
+</body>
+
+</html>
+
+"""
+
+ 
+
+display(HTML(html_piano_code)
